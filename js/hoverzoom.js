@@ -148,6 +148,7 @@ var hoverZoom = {
                 host:'',
                 naturalHeight:0,
                 naturalWidth:0,
+                naturalSrc:'',
                 displayedHeight:0,
                 displayedWidth:0,
                 video:false,
@@ -530,10 +531,23 @@ var hoverZoom = {
                 hz.hzViewer.width('auto').height('auto');
                 //hz.hzViewer.css('visibility', 'visible');
 
-                // image natural dimensions
-
-                srcDetails.naturalWidth = (imgFullSize[0].naturalWidth ? imgFullSize[0].naturalWidth : imgFullSize.width());
-                srcDetails.naturalHeight = (imgFullSize[0].naturalHeight ? imgFullSize[0].naturalHeight : imgFullSize.height());
+                // natural dimensions are sampled for the current source and kept
+                // until the source changes: a video only exposes the dimensions of the
+                // rendition being decoded and adaptive streams change rendition during
+                // playback (e.g. while seeking), which must not resize the viewer
+                if (srcDetails.naturalSrc !== srcDetails.url) {
+                    srcDetails.naturalSrc = srcDetails.url;
+                    srcDetails.naturalWidth = 0;
+                    srcDetails.naturalHeight = 0;
+                }
+                if (!srcDetails.naturalWidth || !srcDetails.naturalHeight) {
+                    const media = imgFullSize[0];
+                    const size = (media.naturalWidth && media.naturalHeight) ? { width:media.naturalWidth, height:media.naturalHeight } : getVideoNaturalSize(media);
+                    if (size.width && size.height) {
+                        srcDetails.naturalWidth = size.width;
+                        srcDetails.naturalHeight = size.height;
+                    }
+                }
 
                 if (!srcDetails.naturalWidth || !srcDetails.naturalHeight) {
                     return;
@@ -638,8 +652,8 @@ var hoverZoom = {
             }
             var clientX = (event && typeof event.clientX === 'number') ? event.clientX : (lastClientPos.x !== null ? lastClientPos.x : (window.innerWidth / 2));
             var clientY = (event && typeof event.clientY === 'number') ? event.clientY : (lastClientPos.y !== null ? lastClientPos.y : (window.innerHeight / 2));
-            var width = imgFullSize[0].width || (imgFullSize[0].videoWidth ? imgFullSize[0].videoWidth * zoomFactor : 0);
-            var height = imgFullSize[0].height || (imgFullSize[0].videoHeight ? imgFullSize[0].videoHeight * zoomFactor : 0);
+            var width = imgFullSize.width() || imgFullSize[0].width;
+            var height = imgFullSize.height() || imgFullSize[0].height;
             var widthOffset = (width - window.innerWidth) / 2;
             var heightOffset = (height - window.innerHeight) / 2;
             var ratioX = 1 - (2 * clientX / window.innerWidth);
@@ -743,6 +757,35 @@ var hoverZoom = {
                 srcDetails.url = `https://v.redd.it/${redditMatch[1]}/HLSPlaylist.m3u8`;
                 delete srcDetails.audioUrl;
             }
+        }
+
+        // rendition of the adaptive stream played by hls.js with the best resolution
+        // (ties are resolved by bitrate), so that videos are displayed with the best
+        // possible resolution just like images are displayed at their natural size
+        function getBestHlsLevel() {
+            if (!hls || !hls.levels || !hls.levels.length) return undefined;
+            let best = hls.levels[0];
+            for (let i = 1; i < hls.levels.length; i++) {
+                const level = hls.levels[i];
+                const area = (level.width || 0) * (level.height || 0);
+                const bestArea = (best.width || 0) * (best.height || 0);
+                if (area > bestArea || (area === bestArea && (level.bitrate || 0) > (best.bitrate || 0))) {
+                    best = level;
+                }
+            }
+            return best;
+        }
+
+        // best available dimensions for a video: a video only exposes the dimensions of
+        // the rendition being decoded (videoWidth/videoHeight) and adaptive streams
+        // change rendition during playback (e.g. while seeking), so the dimensions of
+        // the best rendition are used instead
+        function getVideoNaturalSize(video) {
+            const level = (hls && hls.media === video) ? getBestHlsLevel() : undefined;
+            if (level && level.width && level.height) {
+                return { width:level.width, height:level.height };
+            }
+            return { width:video.videoWidth, height:video.videoHeight };
         }
 
         function updateAmbilight() {
@@ -1717,6 +1760,7 @@ var hoverZoom = {
                     video.style.pointerEvents = viewerLocked ? 'auto' : 'none';
                     hls = new Hls({
                         debug: debug,
+                        autoStartLoad: false,
                     });
 
                     // MP4 buffering
@@ -1939,6 +1983,16 @@ var hoverZoom = {
                         return window.URL.createObjectURL(textToSaveAsBlob);
                     }
                     // -->
+
+                    // always play the best rendition available (best possible resolution)
+                    // and keep the decoded rendition stable during playback
+                    hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                        const best = getBestHlsLevel();
+                        if (best) {
+                            hls.loadLevel = hls.levels.indexOf(best);
+                        }
+                        hls.startLoad();
+                    });
 
                     hls.loadSource(srcDetails.url);
                     hls.attachMedia(video);
